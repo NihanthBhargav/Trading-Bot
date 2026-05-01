@@ -3,6 +3,7 @@ import hmac
 import hashlib
 import time
 import json
+import os
 from typing import Dict, Any, Optional
 import httpx
 
@@ -22,14 +23,21 @@ class BinanceFuturesClient:
             api_key: Binance API Key
             api_secret: Binance API Secret
         """
-        if not api_key or not api_secret:
-            raise ValueError("API key and secret must not be empty")
-        
         self.api_key = api_key
         self.api_secret = api_secret
-        self.client = httpx.Client(base_url=self.BASE_URL, timeout=30.0)
         
-        logger.info("Binance Futures Client initialized")
+        # Check if mock mode is enabled
+        self.mock_mode = os.getenv("MOCK_MODE", "false").lower() == "true"
+        
+        if self.mock_mode:
+            self.client = None
+            logger.info("Binance Futures Client initialized in MOCK MODE")
+        else:
+            if not api_key or not api_secret:
+                raise ValueError("API key and secret must not be empty")
+            
+            self.client = httpx.Client(base_url=self.BASE_URL, timeout=30.0)
+            logger.info("Binance Futures Client initialized")
     
     def _generate_signature(self, query_string: str) -> str:
         """Generate HMAC-SHA256 signature"""
@@ -38,6 +46,40 @@ class BinanceFuturesClient:
             query_string.encode(),
             hashlib.sha256
         ).hexdigest()
+    
+    def _get_mock_response(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate mock response for testing without real API"""
+        import random
+        
+        if "/fapi/v1/order" in endpoint:
+            order_id = random.randint(100000000, 999999999)
+            price = float(params.get("price", 50000))
+            quantity = float(params.get("quantity", 0.01))
+            
+            return {
+                "orderId": order_id,
+                "symbol": params.get("symbol", "BTCUSDT"),
+                "status": "FILLED" if params.get("type") == "MARKET" else "NEW",
+                "side": params.get("side", "BUY"),
+                "type": params.get("type", "MARKET"),
+                "origQty": quantity,
+                "executedQty": quantity if params.get("type") == "MARKET" else 0,
+                "avgPrice": str(price),
+                "cumQuote": str(quantity * price) if params.get("type") == "MARKET" else "0",
+                "price": str(price),
+                "timeInForce": params.get("timeInForce", "GTC"),
+                "updateTime": int(time.time() * 1000),
+                "msg": "Order placed successfully (MOCK)"
+            }
+        elif "/fapi/v2/account" in endpoint:
+            return {
+                "totalWalletBalance": "10000.00",
+                "totalUnrealizedProfit": "0.00",
+                "msg": "Account info (MOCK)"
+            }
+        else:
+            return {"msg": "Mock response"}
+    
     
     def _make_request(
         self,
@@ -64,7 +106,18 @@ class BinanceFuturesClient:
         if params is None:
             params = {}
         
+        # If mock mode is enabled, return mock response
+        if self.mock_mode:
+            logger.info(f"[MOCK MODE] Making {method} request to {endpoint}")
+            logger.debug(f"[MOCK MODE] Parameters: {params}")
+            mock_response = self._get_mock_response(endpoint, params)
+            logger.debug(f"[MOCK MODE] Response: {json.dumps(mock_response, indent=2)}")
+            return mock_response
+        
         # Add timestamp for signed requests
+        if params is None:
+            params = {}
+        
         if signed:
             params['timestamp'] = int(time.time() * 1000)
         
@@ -191,5 +244,6 @@ class BinanceFuturesClient:
     
     def close(self):
         """Close the HTTP client"""
-        self.client.close()
+        if self.client:
+            self.client.close()
         logger.info("Binance Futures Client closed")
